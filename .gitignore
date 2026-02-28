@@ -6,3 +6,9 @@
 # Ignore Portmaster libraries
 init/MUOS/PortMaster/libs/
 share/archive/
+
+# Moonlight GUI runtime / local config
+share/application/Moonlight/conf/ip.txt
+share/application/Moonlight/conf/pair.txt
+share/application/Moonlight/conf/port.txt
+share/application/Moonlight/moonlight/command.txt
