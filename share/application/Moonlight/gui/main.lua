@@ -570,16 +570,13 @@ local function readFileTrim(path)
     return (v:match("^%s*(.-)%s*$") or "")
 end
 
-local function buildHostArg(host, port)
+-- Build host + optional -port for moonlight commands (moonlight supports -port)
+local function buildHostAndPortArgs(host, port)
     host = (host or ""):match("^%s*(.-)%s*$") or ""
     port = (port or ""):match("^%s*(.-)%s*$") or ""
-    if host == "" then return "" end
-    if port == "" then return host end
-    -- If host looks like IPv6 without brackets, wrap it for host:port.
-    if host:find(":", 1, true) and not host:match("^%[.*%]$") then
-        host = "[" .. host .. "]"
-    end
-    return host .. ":" .. port
+    if host == "" then return nil, nil end
+    if port == "" then return host, nil end
+    return host, port
 end
 
 
@@ -621,18 +618,17 @@ function handleConnectMenuSelection()
     else
         local host = readFileTrim(ipFilePath)
         local port = readFileTrim(portFilePath)
-        local hostArg = buildHostArg(host, port)
-        if hostArg == "" then return end
+        local hostArg, portArg = buildHostAndPortArgs(host, port)
+        if not hostArg then return end
 
-        -- Construct the command based on the selected option and the read IP address
+        local portOpt = (portArg and portArg ~= "") and ("-port " .. portArg .. " ") or ""
         local command
         if selectedOption == 1 then
-            command = "moonlight pair " .. hostArg
+            command = "moonlight pair " .. portOpt .. hostArg
         elseif selectedOption == 4 then
-            command = "moonlight list " .. hostArg
+            command = "moonlight list " .. portOpt .. hostArg
         end
 
-        -- Execute the command asynchronously and save its output
         coroutineThread = coroutine.create(executeCommandAndSaveOutput)
         coroutine.resume(coroutineThread, command, selectedOption == 1 and pairFileName or appsFileName)
     end
@@ -1547,20 +1543,19 @@ function writeSelectedApp(selectedApp, bitrate, resolution, framerate, codec, re
     
     local host = readFileTrim(ipFilePath)
     local port = readFileTrim(portFilePath)
-    local hostArg = buildHostArg(host, port)
-    if hostArg == "" then return end
-    
-    
-    -- Construct the command string with app name, bitrate, resolution, framerate, codec, remote, and IP address
+    local hostArg, portArg = buildHostAndPortArgs(host, port)
+    if not hostArg then return end
+
+    -- moonlight [action] (options) [host]: host last; -quitappafter is a flag; -port N before host
+    local portOpt = (portArg and portArg ~= "") and (" -port " .. portArg) or ""
     local command = 'stream -app "' .. selectedApp .. '" ' ..
-                    '-keydir "$LOVEDIR/keys" ' ..  
+                    '-keydir "$LOVEDIR/keys" ' ..
                     '-bitrate ' .. bitrate .. ' ' ..
                     '-width ' .. width .. ' ' ..
                     '-height ' .. height .. ' ' ..
                     '-fps ' .. framerate .. ' ' ..
                     '-codec ' .. codec .. ' ' ..
-                    '-remote ' .. remote .. ' ' ..
-                    '-quitappafter ' .. hostArg
+                    '-remote ' .. remote .. ' -quitappafter' .. portOpt .. ' ' .. hostArg
 
     local file = io.open("moonlight/command.txt", "w")
     if file then
