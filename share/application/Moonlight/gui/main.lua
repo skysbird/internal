@@ -12,7 +12,7 @@ end
 local menus = {
     mainMenu = {"Settings", "Play", "Connect"},
     settingsMenu = {"Resolutions", "Bitrate", "Framerate", "Codec", "Remote Optimized", "Sfx", "Music", "Theme"},
-    connectMenu = {"Pair", "IP Address", "Reload Apps"},
+    connectMenu = {"Pair", "Host", "Port", "Reload Apps"},
     playMenu = {} -- Defined dynamically later
 }
 local selectedMenu = "mainMenu"
@@ -27,6 +27,13 @@ local currentColors = {}
 local transitionSpeed = 2
 local font, smallerFont, tinyFont, largerFont  -- Define fonts globally
 
+-- Helper: create font, fallback to default size if asset missing (e.g. on macOS without assets)
+local function safeNewFont(path, size)
+    local ok, f = pcall(love.graphics.newFont, path, size)
+    if ok and f then return f end
+    return love.graphics.newFont(size)
+end
+
 -- Setup fonts based on window size
 function setupFonts()
     local referenceWidth = 1050  -- Baseline res width where fontsize 32 is good
@@ -37,18 +44,18 @@ function setupFonts()
 
     local fontSize = 38 * scaleFactor  -- Adjust the font size based on the scale factor
 
-    -- Create fonts with specified filter mode
-    font = love.graphics.newFont("assets/font/handy-andy.otf", fontSize)
-    font:setFilter("linear", "linear")  -- Set filter mode to nearest for sharp edges
+    -- Create fonts with specified filter mode (fallback to default font if asset missing)
+    font = safeNewFont("assets/font/handy-andy.otf", fontSize)
+    font:setFilter("linear", "linear")
 
-    tinyFont = love.graphics.newFont("assets/font/handy-andy.otf", fontSize * 0.5)
-    tinyFont:setFilter("linear", "linear")  -- Set filter mode to nearest for sharp edges
+    tinyFont = safeNewFont("assets/font/handy-andy.otf", fontSize * 0.5)
+    tinyFont:setFilter("linear", "linear")
 
-    smallerFont = love.graphics.newFont("assets/font/handy-andy.otf", fontSize * 0.8)
-    smallerFont:setFilter("linear", "linear")  -- Set filter mode to nearest for sharp edges
+    smallerFont = safeNewFont("assets/font/handy-andy.otf", fontSize * 0.8)
+    smallerFont:setFilter("linear", "linear")
 
-    largerFont = love.graphics.newFont("assets/font/handy-andy.otf", fontSize * 1.3)
-    largerFont:setFilter("linear", "linear")  -- Set filter mode to nearest for sharp edges
+    largerFont = safeNewFont("assets/font/handy-andy.otf", fontSize * 1.3)
+    largerFont:setFilter("linear", "linear")
 
     love.graphics.setFont(font)  -- Set the default font
 end
@@ -94,6 +101,17 @@ local themeOptions = {
     "Moonlight", "Sunshine", "Kepler-62f", "Mustard",
 }
 
+-- Default setting indices (used when conf/settings.txt is missing)
+selectedResolutionIndex = 1
+selectedBitrateIndex = 1
+selectedFramerateIndex = 1
+selectedCodecIndex = 1
+selectedRemoteIndex = 1
+selectedSfxIndex = 1
+selectedMusicIndex = 1
+selectedThemeIndex = 1
+previousMusicIndex = 1
+
 -------------------------------------------------------------------------------------------
 -- RESOURCE LOADING -----------------------------------------------------------------------
 -------------------------------------------------------------------------------------------
@@ -110,14 +128,15 @@ local fadeParams = {
 function love.load()
     setupWindow()
     setupFonts()
-    loadBackground()
     initializeColors()
     loadSettings()
     loadMusic()
 
-    -- Initialize the splash screen with current window dimensions
     local width, height = love.graphics.getDimensions()
-    initializeSplashScreen(width, height)
+    local ok, err = pcall(initializeSplashScreen, width, height)
+    if not ok then
+        splash = nil
+    end
 
     -- Initialize fade parameters for fade-in effect
     fadeParams.fadeAlpha = 1
@@ -144,9 +163,52 @@ function initializeSplashScreen(width, height)
 end
 
 function love.keypressed(key)
-    -- Handle keyboard input
     if splash and key == "space" then
         splash:skip()
+        return
+    end
+
+    if not isNumberPadActive then
+        return
+    end
+
+    if key == "backspace" then
+        if activeInputField == "port" then
+            portValue = string.sub(portValue, 1, -2)
+        else
+            ipAddress = string.sub(ipAddress, 1, -2)
+        end
+    elseif key == "return" or key == "kpenter" then
+        isNumberPadActive = false
+        if activeInputField == "port" then
+            savePort(portValue)
+        else
+            saveIPAddress(ipAddress)
+        end
+    elseif key == "escape" then
+        isNumberPadActive = false
+        if activeInputField == "port" then
+            savePort(portValue)
+        else
+            saveIPAddress(ipAddress)
+        end
+    end
+end
+
+function love.textinput(t)
+    if not isNumberPadActive then return end
+    if not t or #t ~= 1 then return end
+
+    if activeInputField == "port" then
+        if t:match("^%d$") and #portValue < 5 then
+            portValue = portValue .. t
+        end
+        return
+    end
+
+    -- Host: allow hostname / IPv4 / IPv6 chars (port is configured separately)
+    if t:match("^[%w%.%-%[%]%:]$") then
+        ipAddress = ipAddress .. t
     end
 end
 
@@ -338,19 +400,83 @@ function handleMainMenuSelection()
     updateCurrentColors()
 end
 
--- numpad input handler
+-- numpad (port) and host keyboard layouts
 numberPad = {
     "1", "2", "3",
     "4", "5", "6",
     "7", "8", "9",
     ".", "0", "-",
-	"Back", ":", "Done" 
+    "Back", ":", "Done"
 }
-function handleNumberPadInput()
-    if not numberPad or #numberPad == 0 then return end
 
+-- Host keyboard: rows of keys for domain input (letters + numbers + symbols)
+hostKeyboardRows = {
+    {"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"},
+    {"k", "l", "m", "n", "o", "p", "q", "r", "s", "t"},
+    {"u", "v", "w", "x", "y", "z", "0", "1", "2", "3"},
+    {"4", "5", "6", "7", "8", "9", ".", "-", ":", "Back"},
+    {"Done"}
+}
+hostKbRow = 1
+hostKbCol = 1
+
+function handleNumberPadInput()
     local gamepad = love.joystick.getJoysticks()[1]
 
+    if (love.keyboard.isDown("return") or (gamepad and gamepad:isGamepadDown("b"))) and not isNumberPadActive then
+        isNumberPadActive = true
+        timeSinceLastInput = 0
+        return
+    end
+    if isNumberPadActive and (love.keyboard.isDown("escape") or (gamepad and gamepad:isGamepadDown("b"))) then
+        isNumberPadActive = false
+        if activeInputField == "port" then savePort(portValue) else saveIPAddress(ipAddress) end
+        timeSinceLastInput = 0
+        return
+    end
+    if isNumberPadActive and (gamepad and gamepad:isGamepadDown("back")) then
+        isNumberPadActive = false
+        if activeInputField == "port" then savePort(portValue) else saveIPAddress(ipAddress) end
+        timeSinceLastInput = 0
+        return
+    end
+    if (gamepad and gamepad:isGamepadDown("start")) and not isNumberPadActive then
+        isNumberPadActive = true
+        timeSinceLastInput = 0
+        return
+    end
+
+    if not isNumberPadActive then return end
+
+    if activeInputField == "host" then
+        local rows = hostKeyboardRows
+        local maxRow = #rows
+        if love.keyboard.isDown("up") or (gamepad and gamepad:isGamepadDown("dpup")) then
+            hostKbRow = hostKbRow - 1
+            if hostKbRow < 1 then hostKbRow = maxRow end
+            hostKbCol = math.min(hostKbCol, #rows[hostKbRow])
+            timeSinceLastInput = 0
+        elseif love.keyboard.isDown("down") or (gamepad and gamepad:isGamepadDown("dpdown")) then
+            hostKbRow = hostKbRow + 1
+            if hostKbRow > maxRow then hostKbRow = 1 end
+            hostKbCol = math.min(hostKbCol, #rows[hostKbRow])
+            timeSinceLastInput = 0
+        elseif love.keyboard.isDown("left") or (gamepad and gamepad:isGamepadDown("dpleft")) then
+            hostKbCol = hostKbCol - 1
+            if hostKbCol < 1 then hostKbCol = #rows[hostKbRow] end
+            timeSinceLastInput = 0
+        elseif love.keyboard.isDown("right") or (gamepad and gamepad:isGamepadDown("dpright")) then
+            hostKbCol = hostKbCol + 1
+            if hostKbCol > #rows[hostKbRow] then hostKbCol = 1 end
+            timeSinceLastInput = 0
+        elseif love.keyboard.isDown("return") or (gamepad and gamepad:isGamepadDown("a")) then
+            handleHostKeySelection()
+            timeSinceLastInput = 0
+        end
+        return
+    end
+
+    if not numberPad or #numberPad == 0 then return end
     if love.keyboard.isDown("up") or (gamepad and gamepad:isGamepadDown("dpup")) then
         numberPadSelection = numberPadSelection - 3
         if numberPadSelection < 1 then numberPadSelection = #numberPad end
@@ -358,6 +484,7 @@ function handleNumberPadInput()
     elseif love.keyboard.isDown("down") or (gamepad and gamepad:isGamepadDown("dpdown")) then
         numberPadSelection = numberPadSelection + 3
         if numberPadSelection > #numberPad then numberPadSelection = numberPadSelection % 3 end
+        if numberPadSelection < 1 then numberPadSelection = 1 end
         timeSinceLastInput = 0
     elseif love.keyboard.isDown("left") or (gamepad and gamepad:isGamepadDown("dpleft")) then
         numberPadSelection = numberPadSelection - 1
@@ -367,39 +494,55 @@ function handleNumberPadInput()
         numberPadSelection = numberPadSelection + 1
         if numberPadSelection > #numberPad then numberPadSelection = 1 end
         timeSinceLastInput = 0
-    elseif (love.keyboard.isDown("return") or (gamepad and gamepad:isGamepadDown("b"))) and not isNumberPadActive then
-        isNumberPadActive = true
-        timeSinceLastInput = 0
-    elseif love.keyboard.isDown("escape") or (gamepad and gamepad:isGamepadDown("b")) and isNumberPadActive then
-        isNumberPadActive = false
-        saveIPAddress(ipAddress)
-        timeSinceLastInput = 0
-    elseif (gamepad and gamepad:isGamepadDown("start")) and not isNumberPadActive then
-        isNumberPadActive = true
-        timeSinceLastInput = 0
-    elseif (gamepad and gamepad:isGamepadDown("back")) and isNumberPadActive then
-        isNumberPadActive = false
-        saveIPAddress(ipAddress)
-        timeSinceLastInput = 0
-    elseif (love.keyboard.isDown("return") or (gamepad and gamepad:isGamepadDown("a"))) and isNumberPadActive then
+    elseif love.keyboard.isDown("return") or (gamepad and gamepad:isGamepadDown("a")) then
         handleNumberPadSelection()
         timeSinceLastInput = 0
     end
+end
+
+function handleHostKeySelection()
+    local key = hostKeyboardRows[hostKbRow] and hostKeyboardRows[hostKbRow][hostKbCol]
+    if not key then return end
+    if key == "Done" then
+        isNumberPadActive = false
+        saveIPAddress(ipAddress)
+        return
+    end
+    if key == "Back" then
+        ipAddress = string.sub(ipAddress, 1, -2)
+        return
+    end
+    ipAddress = ipAddress .. key
 end
 
 -- Handle selection in the number pad
 function handleNumberPadSelection()
     if numberPad[numberPadSelection] ~= "Done" then
         if numberPad[numberPadSelection] == "Back" then
-            ipAddress = string.sub(ipAddress, 1, -2)
-        elseif numberPad[numberPadSelection] == "Clear" then
-            ipAddress = ""
+            if activeInputField == "port" then
+                portValue = string.sub(portValue, 1, -2)
+            else
+                ipAddress = string.sub(ipAddress, 1, -2)
+            end
         else
-            ipAddress = ipAddress .. numberPad[numberPadSelection]
+            local ch = numberPad[numberPadSelection]
+            if activeInputField == "port" then
+                if ch:match("^%d$") and #portValue < 5 then
+                    portValue = portValue .. ch
+                end
+            else
+                if ch:match("^[%d%.%-:]$") then
+                    ipAddress = ipAddress .. ch
+                end
+            end
         end
     else
         isNumberPadActive = false
-        saveIPAddress(ipAddress)
+        if activeInputField == "port" then
+            savePort(portValue)
+        else
+            saveIPAddress(ipAddress)
+        end
     end
 end
 
@@ -409,8 +552,31 @@ end
 local appsFileName = "conf/apps.txt"
 local pairFileName = "conf/pair.txt"  -- Added pair file name
 local ipFilePath = "conf/ip.txt"
+local portFilePath = "conf/port.txt"
 local settingsFilePath = "conf/settings.txt"
 local hasReloadedContent = false  -- Track whether the command has been executed
+
+activeInputField = "host" -- "host" or "port"
+
+local function readFileTrim(path)
+    local f = io.open(path, "r")
+    if not f then return "" end
+    local v = f:read("*all") or ""
+    f:close()
+    return (v:match("^%s*(.-)%s*$") or "")
+end
+
+local function buildHostArg(host, port)
+    host = (host or ""):match("^%s*(.-)%s*$") or ""
+    port = (port or ""):match("^%s*(.-)%s*$") or ""
+    if host == "" then return "" end
+    if port == "" then return host end
+    -- If host looks like IPv6 without brackets, wrap it for host:port.
+    if host:find(":", 1, true) and not host:match("^%[.*%]$") then
+        host = "[" .. host .. "]"
+    end
+    return host .. ":" .. port
+end
 
 
 
@@ -438,30 +604,28 @@ menus.playMenu = readAppsFromFile(appsFileName)
 
 function handleConnectMenuSelection()
     if selectedOption == 2 then
+        activeInputField = "host"
+        hostKbRow, hostKbCol = 1, 1
+        isNumberPadActive = true
+        numberPadSelection = 1
+        timeSinceLastInput = 0
+    elseif selectedOption == 3 then
+        activeInputField = "port"
         isNumberPadActive = true
         numberPadSelection = 1
         timeSinceLastInput = 0
     else
-        -- Read IP address from ip.txt
-        local ipFile = io.open(ipFilePath, "r")  -- Adjusted IP file path
-        local ipAddress = ""
-        if ipFile then
-            ipAddress = ipFile:read("*all")
-            ipFile:close()
-        else
-            print("Error: Could not read IP address from ip.txt")
-            return  -- Exit the function if IP reading fails
-        end
-        
-        -- Trim any leading or trailing whitespace
-        ipAddress = ipAddress:match("^%s*(.-)%s*$")
+        local host = readFileTrim(ipFilePath)
+        local port = readFileTrim(portFilePath)
+        local hostArg = buildHostArg(host, port)
+        if hostArg == "" then return end
 
         -- Construct the command based on the selected option and the read IP address
         local command
         if selectedOption == 1 then
-            command = "moonlight pair " .. ipAddress
-        elseif selectedOption == 3 then
-            command = "moonlight list " .. ipAddress
+            command = "moonlight pair " .. hostArg
+        elseif selectedOption == 4 then
+            command = "moonlight list " .. hostArg
         end
 
         -- Execute the command asynchronously and save its output
@@ -552,81 +716,124 @@ function readIPAddress()
     if file then
         ipAddress = file:read("*all")
         file:close()
-    else
-        print("Error: Could not open file for reading.")
     end
     return ipAddress
 end
 
+function savePort(port)
+    local file = io.open(portFilePath, "w")
+    if file then
+        file:write(port or "")
+        file:close()
+    end
+end
+
+function readPort()
+    local file = io.open(portFilePath, "r")
+    local port = ""
+    if file then
+        port = file:read("*all")
+        file:close()
+    end
+    return port
+end
+
 numberPadSelection = 1
 ipAddress = readIPAddress() -- Initialize the IP address string
+portValue = readPort()
 isNumberPadActive = false
 timeSinceLastInput = 0
 
 function drawNumberPad()
     local windowWidth, windowHeight = love.graphics.getDimensions()
-    local buttonWidth = windowWidth / 10  -- Adjusted to account for spacing
-    local buttonHeight = windowHeight / 16  -- Adjusted to account for spacing
-    local buttonSpacing = windowWidth / 100  -- Adjust the spacing as needed
-    local padX = (windowWidth - (3 * buttonWidth + 2 * buttonSpacing)) / 2
-    local padY = (windowHeight - (5 * buttonHeight + 4 * buttonSpacing)) / 3   -- Adjusting the starting Y position
-    local cornerRadius = 5  -- Radius for rounding corners
-    local borderThickness = 2  -- Thickness for the border
-    local backgroundMargin = 4  -- Margin between buttons and background
+    local cornerRadius = 5
+    local borderThickness = 2
+    local backgroundMargin = 4
 
-    -- Calculate background dimensions with margin
+    if activeInputField == "host" then
+        -- Host keyboard: 10 cols x 5 rows, smaller buttons
+        local cols = 10
+        local rows = #hostKeyboardRows
+        local buttonSpacing = math.max(2, windowWidth / 120)
+        local buttonWidth = (windowWidth - (cols + 1) * buttonSpacing - 2 * backgroundMargin) / cols
+        local buttonHeight = math.min(buttonWidth * 1.1, (windowHeight * 0.5 - (rows + 1) * buttonSpacing - 2 * backgroundMargin) / rows)
+        local padWidth = cols * buttonWidth + (cols - 1) * buttonSpacing
+        local padHeight = rows * buttonHeight + (rows - 1) * buttonSpacing
+        local padX = (windowWidth - padWidth) / 2
+        local padY = (windowHeight - padHeight) / 2 - windowHeight * 0.05
+        local backgroundX = padX - backgroundMargin
+        local backgroundY = padY - backgroundMargin
+        local backgroundWidth = padWidth + 2 * backgroundMargin
+        local backgroundHeight = padHeight + 2 * backgroundMargin
+
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.setLineWidth(borderThickness)
+        love.graphics.rectangle("line", backgroundX - borderThickness / 2, backgroundY - borderThickness / 2, backgroundWidth + borderThickness, backgroundHeight + borderThickness, cornerRadius, cornerRadius)
+        love.graphics.setColor(0, 0, 0, 0.8)
+        love.graphics.rectangle("fill", backgroundX, backgroundY, backgroundWidth, backgroundHeight, cornerRadius, cornerRadius)
+
+        for r, rowKeys in ipairs(hostKeyboardRows) do
+            for c, key in ipairs(rowKeys) do
+                local x = padX + (c - 1) * (buttonWidth + buttonSpacing)
+                local y = padY + (r - 1) * (buttonHeight + buttonSpacing)
+                if r == hostKbRow and c == hostKbCol then
+                    love.graphics.setColor(0.7, 0.7, 0.7, 0.4)
+                    love.graphics.rectangle("fill", x, y, buttonWidth, buttonHeight, cornerRadius, cornerRadius)
+                end
+                love.graphics.setColor(1, 1, 1, 1)
+                love.graphics.setFont(tinyFont)
+                love.graphics.printf(key, x, y + buttonHeight * 0.25, buttonWidth, "center")
+            end
+        end
+
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.setFont(largerFont)
+        love.graphics.printf("Host: " .. ipAddress, 0, backgroundY - buttonHeight * 0.8, windowWidth, "center")
+        return
+    end
+
+    -- Port: 3x5 numpad
+    local buttonWidth = windowWidth / 10
+    local buttonHeight = windowHeight / 16
+    local buttonSpacing = windowWidth / 100
+    local padX = (windowWidth - (3 * buttonWidth + 2 * buttonSpacing)) / 2
+    local padY = (windowHeight - (5 * buttonHeight + 4 * buttonSpacing)) / 3
     local backgroundWidth = 3 * buttonWidth + 2 * buttonSpacing + 2 * backgroundMargin
     local backgroundHeight = 5 * buttonHeight + 4 * buttonSpacing + 2 * backgroundMargin
     local backgroundX = padX - backgroundMargin
     local backgroundY = padY - backgroundMargin
 
-    -- Draw white border around the semi-transparent background
-    love.graphics.setColor(1, 1, 1, 1)  -- White color for the border
+    love.graphics.setColor(1, 1, 1, 1)
     love.graphics.setLineWidth(borderThickness)
     love.graphics.rectangle("line", backgroundX - borderThickness / 2, backgroundY - borderThickness / 2, backgroundWidth + borderThickness, backgroundHeight + borderThickness, cornerRadius, cornerRadius)
-
-    -- Draw semi-transparent background
     love.graphics.setColor(0, 0, 0, 0.8)
     love.graphics.rectangle("fill", backgroundX, backgroundY, backgroundWidth, backgroundHeight, cornerRadius, cornerRadius)
-
-    -- Draw light gray grid lines to indicate button positions
-    love.graphics.setColor(0.7, 0.7, 0.7, 1)  -- Light gray color
+    love.graphics.setColor(0.7, 0.7, 0.7, 1)
     love.graphics.setLineWidth(1)
-
-    -- Draw vertical lines
     for i = 1, 2 do
         local x = padX + i * (buttonWidth + buttonSpacing) - buttonSpacing / 2
         love.graphics.line(x, padY, x, padY + 5 * buttonHeight + 4 * buttonSpacing)
     end
-
-    -- Draw horizontal lines
     for i = 1, 4 do
         local y = padY + i * (buttonHeight + buttonSpacing) - buttonSpacing / 2
         love.graphics.line(padX, y, padX + 3 * buttonWidth + 2 * buttonSpacing, y)
     end
 
-    -- Draw individual buttons
     for i, button in ipairs(numberPad) do
         local x = padX + ((i - 1) % 3) * (buttonWidth + buttonSpacing)
         local y = padY + math.floor((i - 1) / 3) * (buttonHeight + buttonSpacing)
-        
-        -- Draw button background if selected
         if i == numberPadSelection then
-            love.graphics.setColor(0.7, 0.7, 0.7, 0.4)  -- Semi-transparent white color
+            love.graphics.setColor(0.7, 0.7, 0.7, 0.4)
             love.graphics.rectangle("fill", x, y, buttonWidth, buttonHeight, cornerRadius, cornerRadius)
         end
-        
-        -- Draw button text
-        love.graphics.setColor(1, 1, 1, 1)  -- White color for the text
-		love.graphics.setFont(smallerFont)
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.setFont(smallerFont)
         love.graphics.printf(button, x, y + buttonHeight / 4, buttonWidth, "center")
     end
 
-    -- Draw IP Address text
     love.graphics.setColor(1, 1, 1, 1)
-	love.graphics.setFont(largerFont)
-    local textOffset = buttonHeight * 1.5  -- Adjust the text offset as needed
-    love.graphics.printf("IP: " .. ipAddress, 0, backgroundY - textOffset, windowWidth, "center")
+    love.graphics.setFont(largerFont)
+    love.graphics.printf("Port: " .. portValue, 0, backgroundY - buttonHeight * 1.5, windowWidth, "center")
 end
 
 
@@ -784,22 +991,20 @@ end
 
 
 function loadSettings()
-    local file = io.open(settingsFilePath, "r")  -- Open file for reading
+    local file = io.open(settingsFilePath, "r")
     if file then
         selectedResolutionIndex = tonumber(file:read("*l")) or selectedResolutionIndex
         selectedBitrateIndex = tonumber(file:read("*l")) or selectedBitrateIndex
         selectedFramerateIndex = tonumber(file:read("*l")) or selectedFramerateIndex
-        selectedCodecIndex = tonumber(file:read("*l")) or selectedCodecIndex  
-        selectedRemoteIndex = tonumber(file:read("*l")) or selectedRemoteIndex  
+        selectedCodecIndex = tonumber(file:read("*l")) or selectedCodecIndex
+        selectedRemoteIndex = tonumber(file:read("*l")) or selectedRemoteIndex
         selectedSfxIndex = tonumber(file:read("*l")) or selectedSfxIndex
         selectedMusicIndex = tonumber(file:read("*l")) or selectedMusicIndex
         selectedThemeIndex = tonumber(file:read("*l")) or selectedThemeIndex
-        file:close()  -- Close the file
-        
-        -- Load background based on selected theme
+        file:close()
         loadBackground(themeOptions[selectedThemeIndex])
     else
-        print("Error: Could not open settings file for reading")
+        loadBackground(themeOptions[selectedThemeIndex])
     end
 end
 
@@ -893,9 +1098,11 @@ function drawMenu()
     -- Draw the IP address under the "IP Address" option in the "Connect" menu
     if selectedMenu == "connectMenu" then
         local offsetY = optionY + font:getHeight() + 10  -- Calculate the offset for other options
-        local ipAddressText = readIPAddress()  -- Get the IP address from the file
+        local ipAddressText = readIPAddress()
+        local portText = readPort()
         love.graphics.setColor(normalColor)
         love.graphics.print(ipAddressText, (2 - 1) * optionSpacing + (optionSpacing / 2) - font:getWidth(ipAddressText) / 2, offsetY)
+        love.graphics.print(portText, (3 - 1) * optionSpacing + (optionSpacing / 2) - font:getWidth(portText) / 2, offsetY)
     end
 
     -- Draw the Settings and Play menu content (dynamic)
@@ -1023,27 +1230,30 @@ function loadMusic()
 
     -- Reload music only when the music option changes
     if selectedMusicIndex ~= previousMusicIndex then
+        backgroundMusic = nil
         if selectedMusicIndex == 1 then
-            backgroundMusic = nil  -- No music for "Off" option
+            -- No music for "Off" option
         elseif selectedMusicIndex == 2 then
-            backgroundMusic = love.audio.newSource("assets/audio/music/svanefossen.ogg", "stream")
+            local ok, s = pcall(love.audio.newSource, "assets/audio/music/svanefossen.ogg", "stream")
+            if ok and s then backgroundMusic = s end
         elseif selectedMusicIndex == 3 then
-            backgroundMusic = love.audio.newSource("assets/audio/music/portmaster.ogg", "stream")
+            local ok, s = pcall(love.audio.newSource, "assets/audio/music/portmaster.ogg", "stream")
+            if ok and s then backgroundMusic = s end
         elseif selectedMusicIndex == 4 then
-            backgroundMusic = love.audio.newSource("assets/audio/music/spacejazz.ogg", "stream")
-		elseif selectedMusicIndex == 5 then
-            backgroundMusic = love.audio.newSource("assets/audio/music/lobbytime.ogg", "stream")
+            local ok, s = pcall(love.audio.newSource, "assets/audio/music/spacejazz.ogg", "stream")
+            if ok and s then backgroundMusic = s end
+        elseif selectedMusicIndex == 5 then
+            local ok, s = pcall(love.audio.newSource, "assets/audio/music/lobbytime.ogg", "stream")
+            if ok and s then backgroundMusic = s end
         elseif selectedMusicIndex == 6 then
-            backgroundMusic = love.audio.newSource("assets/audio/music/cottages.ogg", "stream")
+            local ok, s = pcall(love.audio.newSource, "assets/audio/music/cottages.ogg", "stream")
+            if ok and s then backgroundMusic = s end
         end
 
-        -- Set the music to loop and play it if it is not nil
         if backgroundMusic then
             backgroundMusic:setLooping(true)
             love.audio.play(backgroundMusic)
         end
-
-        -- Update previous index to current index
         previousMusicIndex = selectedMusicIndex
     end
 end
@@ -1094,9 +1304,9 @@ function playUISound(actionType)
         soundPath = "assets/audio/fx/select.ogg"
     end
 
-    -- Check if soundPath is valid and play the sound only if SFX is enabled
     if soundPath and selectedSfxIndex == 1 then
-        love.audio.play(love.audio.newSource(soundPath, "static"))
+        local ok, src = pcall(love.audio.newSource, soundPath, "static")
+        if ok and src then love.audio.play(src) end
     end
 end
 
@@ -1125,6 +1335,12 @@ local numColumns = 25
 local numRows = 25
 local totalFrames = numColumns * numRows
 
+local function safeNewImage(path)
+    local ok, img = pcall(love.graphics.newImage, path)
+    if ok and img then img:setFilter("nearest", "nearest"); return img end
+    return nil
+end
+
 function loadBackground(theme)
     -- Release previously loaded images
     if sky then
@@ -1139,47 +1355,41 @@ function loadBackground(theme)
         animatedSpriteSheet:release()
         animatedSpriteSheet = nil
     end
-    
-    -- Load images with nearest-neighbor filtering
+    if starSpriteSheet then
+        starSpriteSheet:release()
+        starSpriteSheet = nil
+    end
+
+    theme = theme or (themeOptions and themeOptions[selectedThemeIndex]) or "Moonlight"
     love.graphics.setDefaultFilter("nearest", "nearest")
 
     if theme == "Sunshine" then
-        sky = love.graphics.newImage("assets/video/sunshine_sky.png")
-        sky:setFilter("nearest", "nearest")
-        background = love.graphics.newImage("assets/video/sunshine_background.png")
-        background:setFilter("nearest", "nearest")
-        animatedSpriteSheet = love.graphics.newImage("assets/video/sunshine_tiles.png")
-        animatedSpriteSheet:setFilter("nearest", "nearest")
+        sky = safeNewImage("assets/video/sunshine_sky.png")
+        background = safeNewImage("assets/video/sunshine_background.png")
+        animatedSpriteSheet = safeNewImage("assets/video/sunshine_tiles.png")
         starSpriteSheet = nil
     elseif theme == "Moonlight" then
-        sky = love.graphics.newImage("assets/video/moonlight_sky.png")
-        sky:setFilter("nearest", "nearest")
-        background = love.graphics.newImage("assets/video/moonlight_background.png")
-        background:setFilter("nearest", "nearest")
-        animatedSpriteSheet = love.graphics.newImage("assets/video/moonlight_tiles.png")
-        animatedSpriteSheet:setFilter("nearest", "nearest")
-        starSpriteSheet = love.graphics.newImage("assets/video/star_tiles.png")
+        sky = safeNewImage("assets/video/moonlight_sky.png")
+        background = safeNewImage("assets/video/moonlight_background.png")
+        animatedSpriteSheet = safeNewImage("assets/video/moonlight_tiles.png")
+        starSpriteSheet = safeNewImage("assets/video/star_tiles.png")
     elseif theme == "Kepler-62f" then
-        sky = love.graphics.newImage("assets/video/kepler_sky.png")
-        sky:setFilter("nearest", "nearest")
-        animatedSpriteSheet = love.graphics.newImage("assets/video/kepler_tiles.png")
-        animatedSpriteSheet:setFilter("nearest", "nearest")
-		starSpriteSheet = love.graphics.newImage("assets/video/star_tiles.png")
+        sky = safeNewImage("assets/video/kepler_sky.png")
+        animatedSpriteSheet = safeNewImage("assets/video/kepler_tiles.png")
+        starSpriteSheet = safeNewImage("assets/video/star_tiles.png")
     elseif theme == "Mustard" then
-		sky = love.graphics.newImage("assets/video/mustard_sky.png")
-		sky:setFilter("nearest", "nearest")
-		animatedSpriteSheet = love.graphics.newImage("assets/video/mustard_tiles.png")
-        animatedSpriteSheet:setFilter("nearest", "nearest")
-		starSpriteSheet = love.graphics.newImage("assets/video/star_tiles.png")
-    end	
-    -- Restore default filter settings
+        sky = safeNewImage("assets/video/mustard_sky.png")
+        animatedSpriteSheet = safeNewImage("assets/video/mustard_tiles.png")
+        starSpriteSheet = safeNewImage("assets/video/star_tiles.png")
+    end
     love.graphics.setDefaultFilter("linear", "linear")
 end
 
 
 function updateStar(dt)
+    if not sky then return end
     starTimer = starTimer + dt
-    
+
     if starTimer >= starAppearInterval then
         starTimer = starTimer - starAppearInterval
         starAppearInterval = math.random(2, 6) -- Reset interval to a new random value between 2 and 6 seconds
@@ -1209,11 +1419,15 @@ function updateStar(dt)
 end
 
 function drawBackground()
+    local windowWidth, windowHeight = love.graphics.getDimensions()
     if not sky or not animatedSpriteSheet then
+        -- Fallback: solid dark background when assets missing (e.g. on macOS)
+        love.graphics.setColor(0.12, 0.12, 0.2, 1)
+        love.graphics.rectangle("fill", 0, 0, windowWidth, windowHeight)
+        love.graphics.setColor(1, 1, 1, 1)
         return
     end
 
-    local windowWidth, windowHeight = love.graphics.getDimensions()
 
     -- Set the default filter to nearest for sharp pixel scaling
     love.graphics.setDefaultFilter("nearest", "nearest")
@@ -1323,16 +1537,10 @@ function writeSelectedApp(selectedApp, bitrate, resolution, framerate, codec, re
     -- Split resolution string into width and height
     local width, height = resolution:match("(%d+)x(%d+)")
     
-    -- Read IP address from ip.txt
-    local ipFile = io.open(ipFilePath, "r")  -- Adjusted IP file path
-    local ipAddress = ""
-    if ipFile then
-        ipAddress = ipFile:read("*all")
-        ipFile:close()
-    else
-        print("Error: Could not read IP address from ip.txt")
-        return  -- Exit the function if IP reading fails
-    end
+    local host = readFileTrim(ipFilePath)
+    local port = readFileTrim(portFilePath)
+    local hostArg = buildHostArg(host, port)
+    if hostArg == "" then return end
     
     
     -- Construct the command string with app name, bitrate, resolution, framerate, codec, remote, and IP address
@@ -1344,7 +1552,7 @@ function writeSelectedApp(selectedApp, bitrate, resolution, framerate, codec, re
                     '-fps ' .. framerate .. ' ' ..
                     '-codec ' .. codec .. ' ' ..
                     '-remote ' .. remote .. ' ' ..
-                    '-quitappafter ' .. ipAddress
+                    '-quitappafter ' .. hostArg
 
     local file = io.open("moonlight/command.txt", "w")
     if file then
