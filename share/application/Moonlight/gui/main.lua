@@ -409,13 +409,13 @@ numberPad = {
     "Back", ":", "Done"
 }
 
--- Host keyboard: rows of keys for domain input (letters + numbers + symbols)
+-- Host keyboard: standard US 101-key QWERTY layout (main block)
 hostKeyboardRows = {
-    {"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"},
-    {"k", "l", "m", "n", "o", "p", "q", "r", "s", "t"},
-    {"u", "v", "w", "x", "y", "z", "0", "1", "2", "3"},
-    {"4", "5", "6", "7", "8", "9", ".", "-", ":", "Back"},
-    {"Done"}
+    {"1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", "Back"},
+    {"q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "[", "]"},
+    {"a", "s", "d", "f", "g", "h", "j", "k", "l", ";", "'"},
+    {"z", "x", "c", "v", "b", "n", "m", ",", ".", "/"},
+    {":", "Space", "Back", "Done"}
 }
 hostKbRow = 1
 hostKbCol = 1
@@ -510,6 +510,10 @@ function handleHostKeySelection()
     end
     if key == "Back" then
         ipAddress = string.sub(ipAddress, 1, -2)
+        return
+    end
+    if key == "Space" then
+        ipAddress = ipAddress .. " "
         return
     end
     ipAddress = ipAddress .. key
@@ -751,16 +755,16 @@ function drawNumberPad()
     local backgroundMargin = 4
 
     if activeInputField == "host" then
-        -- Host keyboard: 10 cols x 5 rows, smaller buttons
-        local cols = 10
+        -- Host keyboard: standard 101 layout, rows have different lengths (13,12,11,10,4)
         local rows = #hostKeyboardRows
-        local buttonSpacing = math.max(2, windowWidth / 120)
-        local buttonWidth = (windowWidth - (cols + 1) * buttonSpacing - 2 * backgroundMargin) / cols
-        local buttonHeight = math.min(buttonWidth * 1.1, (windowHeight * 0.5 - (rows + 1) * buttonSpacing - 2 * backgroundMargin) / rows)
-        local padWidth = cols * buttonWidth + (cols - 1) * buttonSpacing
+        local maxCols = 13
+        local buttonSpacing = math.max(2, windowWidth / 150)
+        local buttonWidth = (windowWidth - (maxCols + 1) * buttonSpacing - 2 * backgroundMargin) / maxCols
+        local buttonHeight = math.min(buttonWidth * 0.9, (windowHeight * 0.45 - (rows + 1) * buttonSpacing - 2 * backgroundMargin) / rows)
+        local padWidth = maxCols * buttonWidth + (maxCols - 1) * buttonSpacing
         local padHeight = rows * buttonHeight + (rows - 1) * buttonSpacing
         local padX = (windowWidth - padWidth) / 2
-        local padY = (windowHeight - padHeight) / 2 - windowHeight * 0.05
+        local padY = (windowHeight - padHeight) / 2 - windowHeight * 0.04
         local backgroundX = padX - backgroundMargin
         local backgroundY = padY - backgroundMargin
         local backgroundWidth = padWidth + 2 * backgroundMargin
@@ -773,16 +777,20 @@ function drawNumberPad()
         love.graphics.rectangle("fill", backgroundX, backgroundY, backgroundWidth, backgroundHeight, cornerRadius, cornerRadius)
 
         for r, rowKeys in ipairs(hostKeyboardRows) do
+            local rowLen = #rowKeys
+            local rowWidth = rowLen * buttonWidth + (rowLen - 1) * buttonSpacing
+            local rowStartX = padX + (padWidth - rowWidth) / 2
             for c, key in ipairs(rowKeys) do
-                local x = padX + (c - 1) * (buttonWidth + buttonSpacing)
+                local x = rowStartX + (c - 1) * (buttonWidth + buttonSpacing)
                 local y = padY + (r - 1) * (buttonHeight + buttonSpacing)
+                local keyLabel = (key == "Space") and "Space" or key
                 if r == hostKbRow and c == hostKbCol then
                     love.graphics.setColor(0.7, 0.7, 0.7, 0.4)
                     love.graphics.rectangle("fill", x, y, buttonWidth, buttonHeight, cornerRadius, cornerRadius)
                 end
                 love.graphics.setColor(1, 1, 1, 1)
                 love.graphics.setFont(tinyFont)
-                love.graphics.printf(key, x, y + buttonHeight * 0.25, buttonWidth, "center")
+                love.graphics.printf(keyLabel, x, y + buttonHeight * 0.2, buttonWidth, "center")
             end
         end
 
